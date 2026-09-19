@@ -1,7 +1,7 @@
 ---
-name: MicroAsteroids hardware or gameplay issue
-about: Report a ForgeUI MicroAsteroids hardware, control, build, or gameplay problem
-title: "[MicroAsteroids] "
+name: MicroPilot hardware or PFD issue
+about: Report a ForgeUI MicroPilot hardware, control, build, or flight-display problem
+title: "[MicroPilot] "
 labels: hardware
 assignees: ""
 ---
@@ -38,17 +38,20 @@ State whether MISO is connected. For the tested 1.54-inch square module, BLK is 
 | GND | |
 
 - Observed centre calibration values (`Joystick centre X=... Y=...`):
-- Rotation behaviour:
-- Forward thrust behaviour:
-- Reverse/braking behaviour:
-- Fire-button behaviour:
+- Bank response:
+- Pitch response:
 
-## Game behaviour
+## MicroPilot PFD behavior
 
-- Current game state (title, playing, `SHIP LOST`, or `MISSION LOST`):
-- Asteroid rendering and movement:
-- Bullet collision and asteroid-splitting behaviour:
-- HUD, radar, or threat-indicator behaviour:
+- Artificial-horizon behavior:
+- Pitch-ladder behavior:
+- IAS behavior:
+- Altitude behavior:
+- Vertical-speed behavior:
+- Heading behavior:
+- AP LEVEL toggle behavior:
+- Autopilot levelling behavior:
+- Warning annunciations (bank/pitch):
 
 ## Software and results
 

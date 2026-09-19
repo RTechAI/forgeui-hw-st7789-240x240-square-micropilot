@@ -3,11 +3,12 @@
 #include <math.h>
 
 // ============================================================
-// ForgeUI MicroAsteroids
+// ForgeUI MicroPilot
 // ESP32-S3 + ST7789 240x240 + Analog Joystick
+// Miniature animated Primary Flight Display
 // ============================================================
 
-// -------------------- Display -------------------------------
+// ---------------- Display -----------------------------------
 
 #define TFT_SCLK 12
 #define TFT_MOSI 11
@@ -36,7 +37,10 @@ Arduino_GFX *gfx = new Arduino_ST7789(
     SCREEN_H
 );
 
-// -------------------- Joystick ------------------------------
+// Full-screen off-screen canvas
+Arduino_Canvas *canvas = nullptr;
+
+// ---------------- Joystick ----------------------------------
 
 constexpr int JOY_X  = 6;
 constexpr int JOY_Y  = 5;
@@ -45,167 +49,62 @@ constexpr int JOY_SW = 4;
 int joyCentreX = 2048;
 int joyCentreY = 2048;
 
-// -------------------- Colours -------------------------------
+// ---------------- Colours -----------------------------------
 
-constexpr uint16_t C_BLACK   = 0x0000;
-constexpr uint16_t C_WHITE   = 0xFFFF;
-constexpr uint16_t C_CYAN    = 0x07FF;
-constexpr uint16_t C_BLUE    = 0x001F;
-constexpr uint16_t C_GREEN   = 0x07E0;
-constexpr uint16_t C_YELLOW  = 0xFFE0;
-constexpr uint16_t C_RED     = 0xF800;
-constexpr uint16_t C_MAGENTA = 0xF81F;
-constexpr uint16_t C_GREY    = 0x8410;
-constexpr uint16_t C_DKGREY  = 0x3186;
+constexpr uint16_t C_BLACK      = 0x0000;
+constexpr uint16_t C_WHITE      = 0xFFFF;
+constexpr uint16_t C_CYAN       = 0x07FF;
+constexpr uint16_t C_BLUE       = 0x001F;
+constexpr uint16_t C_GREEN      = 0x07E0;
+constexpr uint16_t C_YELLOW     = 0xFFE0;
+constexpr uint16_t C_RED        = 0xF800;
+constexpr uint16_t C_GREY       = 0x8410;
+constexpr uint16_t C_DKGREY     = 0x3186;
 
-// -------------------- Framebuffer ---------------------------
+// PFD colours
+constexpr uint16_t SKY_BLUE     = 0x249F;
+constexpr uint16_t SKY_DARK     = 0x1275;
+constexpr uint16_t GROUND_BROWN = 0x8A82;
+constexpr uint16_t GROUND_DARK  = 0x5140;
+constexpr uint16_t PFD_MAGENTA  = 0xF81F;
 
-// 240 x 240 RGB565 = 115,200 bytes.
-// ESP32-S3 has ample memory for this project.
+// ---------------- Simulation --------------------------------
 
-uint16_t *frameBuffer = nullptr;
+float bankDeg = 0.0f;
+float pitchDeg = 0.0f;
 
-Arduino_Canvas *canvas = nullptr;
+float commandedBank = 0.0f;
+float commandedPitch = 0.0f;
 
-// -------------------- Game state ----------------------------
+float airspeed = 105.0f;
+float altitude = 2450.0f;
+float verticalSpeed = 0.0f;
+float heading = 270.0f;
 
-enum GameState
-{
-    TITLE,
-    PLAYING,
-    PLAYER_EXPLODING,
-    GAME_OVER
-};
-
-GameState gameState = TITLE;
-
-uint32_t score = 0;
-uint32_t highScore = 0;
-
-int lives = 3;
-int wave = 1;
+bool autopilot = false;
 
 unsigned long lastFrame = 0;
-unsigned long stateStart = 0;
-
-// -------------------- Ship ----------------------------------
-
-struct Ship
-{
-    float x;
-    float y;
-
-    float vx;
-    float vy;
-
-    float angle;
-
-    bool thrusting;
-};
-
-Ship ship;
-
-// -------------------- Bullets -------------------------------
-
-struct Bullet
-{
-    float x;
-    float y;
-
-    float vx;
-    float vy;
-
-    int life;
-
-    bool active;
-};
-
-constexpr int MAX_BULLETS = 8;
-Bullet bullets[MAX_BULLETS];
-
-unsigned long lastShot = 0;
-
-// -------------------- Asteroids -----------------------------
-
-enum AsteroidSize
-{
-    AST_LARGE = 3,
-    AST_MEDIUM = 2,
-    AST_SMALL = 1
-};
-
-struct Asteroid
-{
-    float x;
-    float y;
-
-    float vx;
-    float vy;
-
-    float rotation;
-    float rotationSpeed;
-
-    int size;
-
-    bool active;
-
-    uint8_t shape;
-};
-
-constexpr int MAX_ASTEROIDS = 18;
-Asteroid asteroids[MAX_ASTEROIDS];
-
-// -------------------- Particles -----------------------------
-
-struct Particle
-{
-    float x;
-    float y;
-
-    float vx;
-    float vy;
-
-    int life;
-
-    uint16_t colour;
-
-    bool active;
-};
-
-constexpr int MAX_PARTICLES = 42;
-Particle particles[MAX_PARTICLES];
-
-// -------------------- Stars ---------------------------------
-
-struct Star
-{
-    int x;
-    int y;
-
-    uint16_t colour;
-};
-
-constexpr int STAR_COUNT = 38;
-Star stars[STAR_COUNT];
+unsigned long lastButtonTime = 0;
 
 // ============================================================
 // Helpers
 // ============================================================
 
-float degToRad(float degrees)
+float degToRad(float deg)
 {
-    return degrees * 0.01745329252f;
+    return deg * 0.01745329252f;
 }
 
-float wrapFloat(float value, float maximum)
+float clampFloat(float v, float lo, float hi)
 {
-    while (value < 0)
-        value += maximum;
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
 
-    while (value >= maximum)
-        value -= maximum;
-
-    return value;
+float smoothToward(float current, float target, float amount)
+{
+    return current + (target - current) * amount;
 }
 
 bool buttonPressed()
@@ -213,7 +112,7 @@ bool buttonPressed()
     return digitalRead(JOY_SW) == LOW;
 }
 
-float joystickAxis(int raw, int centre)
+float readAxis(int raw, int centre)
 {
     constexpr int deadZone = 180;
 
@@ -243,58 +142,41 @@ float joystickAxis(int raw, int centre)
                 (float)range;
     }
 
-    return constrain(value, -1.0f, 1.0f);
+    return clampFloat(value, -1.0f, 1.0f);
 }
 
-float distanceSquared(
-    float x1,
-    float y1,
-    float x2,
-    float y2)
+// Rotate a point around screen centre.
+//
+// lx / ly = coordinates relative to PFD centre.
+// pitchOffset is applied before rotation.
+void rotatePoint(
+    float lx,
+    float ly,
+    float angle,
+    int &sx,
+    int &sy)
 {
-    float dx = x1 - x2;
-    float dy = y1 - y2;
+    float c = cosf(angle);
+    float s = sinf(angle);
 
-    // Handle screen wrapping for collision distance.
-    if (fabsf(dx) > SCREEN_W / 2)
-        dx =
-            dx > 0
-                ? dx - SCREEN_W
-                : dx + SCREEN_W;
+    sx =
+        (int)(
+            SCREEN_W / 2 +
+            lx * c -
+            ly * s
+        );
 
-    if (fabsf(dy) > SCREEN_H / 2)
-        dy =
-            dy > 0
-                ? dy - SCREEN_H
-                : dy + SCREEN_H;
-
-    return dx * dx + dy * dy;
-}
-
-int asteroidRadius(int size)
-{
-    if (size == AST_LARGE)
-        return 17;
-
-    if (size == AST_MEDIUM)
-        return 11;
-
-    return 6;
+    sy =
+        (int)(
+            SCREEN_H / 2 +
+            lx * s +
+            ly * c
+        );
 }
 
 // ============================================================
-// Canvas helpers
+// Text helpers
 // ============================================================
-
-void clearFrame()
-{
-    canvas->fillScreen(C_BLACK);
-}
-
-void presentFrame()
-{
-    canvas->flush();
-}
 
 void centredText(
     const char *text,
@@ -334,30 +216,44 @@ void centredText(
 
 void calibrateJoystick()
 {
-    clearFrame();
+    canvas->fillScreen(C_BLACK);
 
     centredText(
         "FORGEUI",
-        70,
+        64,
         3,
         C_CYAN
     );
 
     centredText(
-        "CALIBRATING",
-        112,
+        "MICROPILOT",
+        98,
         2,
         C_WHITE
     );
 
     centredText(
-        "RELEASE STICK",
-        140,
+        "FLIGHT CONTROL",
+        132,
+        1,
+        C_GREY
+    );
+
+    centredText(
+        "CALIBRATING...",
+        154,
         1,
         C_GREEN
     );
 
-    presentFrame();
+    centredText(
+        "RELEASE STICK",
+        178,
+        1,
+        C_YELLOW
+    );
+
+    canvas->flush();
 
     long totalX = 0;
     long totalY = 0;
@@ -368,7 +264,6 @@ void calibrateJoystick()
     {
         totalX += analogRead(JOY_X);
         totalY += analogRead(JOY_Y);
-
         delay(5);
     }
 
@@ -383,1332 +278,1186 @@ void calibrateJoystick()
 }
 
 // ============================================================
-// Stars
+// Simulation
 // ============================================================
 
-void initStars()
+void updateFlightModel()
 {
-    for (int i = 0; i < STAR_COUNT; i++)
-    {
-        stars[i].x =
-            random(2, SCREEN_W - 2);
-
-        stars[i].y =
-            random(24, SCREEN_H - 2);
-
-        int brightness =
-            random(0, 3);
-
-        if (brightness == 0)
-            stars[i].colour = C_DKGREY;
-        else if (brightness == 1)
-            stars[i].colour = C_GREY;
-        else
-            stars[i].colour = C_WHITE;
-    }
-}
-
-void drawStars()
-{
-    for (int i = 0; i < STAR_COUNT; i++)
-    {
-        canvas->drawPixel(
-            stars[i].x,
-            stars[i].y,
-            stars[i].colour
-        );
-    }
-}
-
-// ============================================================
-// Particles
-// ============================================================
-
-void spawnParticle(
-    float x,
-    float y,
-    float vx,
-    float vy,
-    int life,
-    uint16_t colour)
-{
-    for (int i = 0; i < MAX_PARTICLES; i++)
-    {
-        if (particles[i].active)
-            continue;
-
-        particles[i].x = x;
-        particles[i].y = y;
-
-        particles[i].vx = vx;
-        particles[i].vy = vy;
-
-        particles[i].life = life;
-        particles[i].colour = colour;
-
-        particles[i].active = true;
-
-        return;
-    }
-}
-
-void updateParticles()
-{
-    for (int i = 0; i < MAX_PARTICLES; i++)
-    {
-        Particle &p = particles[i];
-
-        if (!p.active)
-            continue;
-
-        p.x += p.vx;
-        p.y += p.vy;
-
-        p.x = wrapFloat(p.x, SCREEN_W);
-        p.y = wrapFloat(p.y, SCREEN_H);
-
-        p.vx *= 0.98f;
-        p.vy *= 0.98f;
-
-        p.life--;
-
-        if (p.life <= 0)
-        {
-            p.active = false;
-            continue;
-        }
-
-        canvas->drawPixel(
-            (int)p.x,
-            (int)p.y,
-            p.colour
-        );
-
-        if (p.life > 10)
-        {
-            canvas->drawPixel(
-                ((int)p.x + 1) % SCREEN_W,
-                (int)p.y,
-                p.colour
-            );
-        }
-    }
-}
-
-// ============================================================
-// Ship
-// ============================================================
-
-void resetShip()
-{
-    ship.x = SCREEN_W / 2.0f;
-    ship.y = SCREEN_H / 2.0f;
-
-    ship.vx = 0;
-    ship.vy = 0;
-
-    ship.angle = -90.0f;
-
-    ship.thrusting = false;
-}
-
-void drawShip()
-{
-    float a = degToRad(ship.angle);
-
-    float noseX =
-        ship.x + cosf(a) * 11.0f;
-
-    float noseY =
-        ship.y + sinf(a) * 11.0f;
-
-    float leftA =
-        a + 2.45f;
-
-    float rightA =
-        a - 2.45f;
-
-    float leftX =
-        ship.x + cosf(leftA) * 9.0f;
-
-    float leftY =
-        ship.y + sinf(leftA) * 9.0f;
-
-    float rightX =
-        ship.x + cosf(rightA) * 9.0f;
-
-    float rightY =
-        ship.y + sinf(rightA) * 9.0f;
-
-    canvas->drawLine(
-        (int)noseX,
-        (int)noseY,
-        (int)leftX,
-        (int)leftY,
-        C_CYAN
-    );
-
-    canvas->drawLine(
-        (int)leftX,
-        (int)leftY,
-        (int)rightX,
-        (int)rightY,
-        C_WHITE
-    );
-
-    canvas->drawLine(
-        (int)rightX,
-        (int)rightY,
-        (int)noseX,
-        (int)noseY,
-        C_CYAN
-    );
-
-    canvas->fillCircle(
-        (int)ship.x,
-        (int)ship.y,
-        2,
-        C_WHITE
-    );
-
-    if (ship.thrusting)
-    {
-        float exhaustA =
-            a + PI;
-
-        float ex =
-            ship.x +
-            cosf(exhaustA) * 13.0f;
-
-        float ey =
-            ship.y +
-            sinf(exhaustA) * 13.0f;
-
-        canvas->drawLine(
-            (int)ship.x,
-            (int)ship.y,
-            (int)ex,
-            (int)ey,
-            C_YELLOW
-        );
-
-        if (random(0, 2))
-        {
-            spawnParticle(
-                ex,
-                ey,
-                cosf(exhaustA) *
-                    random(8, 18) * 0.08f,
-                sinf(exhaustA) *
-                    random(8, 18) * 0.08f,
-                random(5, 12),
-                random(0, 2)
-                    ? C_YELLOW
-                    : C_RED
-            );
-        }
-    }
-}
-
-void updateShip()
-{
-    int rawX = analogRead(JOY_X);
-    int rawY = analogRead(JOY_Y);
-
-    float steer =
-        joystickAxis(
-            rawX,
+    float joyX =
+        readAxis(
+            analogRead(JOY_X),
             joyCentreX
         );
 
-    float thrustInput =
-        joystickAxis(
-            rawY,
+    float joyY =
+        readAxis(
+            analogRead(JOY_Y),
             joyCentreY
         );
 
-    // Horizontal joystick rotates ship.
-    ship.angle += steer * 5.0f;
-
-    if (ship.angle >= 360.0f)
-        ship.angle -= 360.0f;
-
-    if (ship.angle < 0.0f)
-        ship.angle += 360.0f;
-
-    // Depending on physical stick orientation,
-    // forward is normally negative Y.
-    float thrust = -thrustInput;
-
-    ship.thrusting =
-        thrust > 0.15f;
-
-    float a =
-        degToRad(ship.angle);
-
-    if (thrust > 0.15f)
+    if (autopilot)
     {
-        ship.vx +=
-            cosf(a) *
-            thrust *
-            0.11f;
-
-        ship.vy +=
-            sinf(a) *
-            thrust *
-            0.11f;
+        // Wings level / zero pitch.
+        commandedBank = 0.0f;
+        commandedPitch = 0.0f;
     }
-    else if (thrust < -0.20f)
+    else
     {
-        // Pulling backwards acts as brake/reverse thrust.
-        ship.vx +=
-            cosf(a) *
-            thrust *
-            0.055f;
+        commandedBank =
+            joyX * 55.0f;
 
-        ship.vy +=
-            sinf(a) *
-            thrust *
-            0.055f;
+        // Physical joystick forward is normally negative ADC delta.
+        commandedPitch =
+            -joyY * 25.0f;
     }
 
-    // Mild space drag keeps the game controllable.
-    ship.vx *= 0.995f;
-    ship.vy *= 0.995f;
-
-    float speed =
-        sqrtf(
-            ship.vx * ship.vx +
-            ship.vy * ship.vy
+    // Smooth aircraft response.
+    bankDeg =
+        smoothToward(
+            bankDeg,
+            commandedBank,
+            autopilot ? 0.075f : 0.10f
         );
 
-    constexpr float maxSpeed = 3.2f;
-
-    if (speed > maxSpeed)
-    {
-        ship.vx =
-            ship.vx /
-            speed *
-            maxSpeed;
-
-        ship.vy =
-            ship.vy /
-            speed *
-            maxSpeed;
-    }
-
-    ship.x += ship.vx;
-    ship.y += ship.vy;
-
-    ship.x =
-        wrapFloat(
-            ship.x,
-            SCREEN_W
+    pitchDeg =
+        smoothToward(
+            pitchDeg,
+            commandedPitch,
+            autopilot ? 0.065f : 0.085f
         );
 
-    ship.y =
-        wrapFloat(
-            ship.y,
-            SCREEN_H
+    // Simulated heading changes with bank.
+    heading += bankDeg * 0.0025f;
+
+    while (heading >= 360.0f)
+        heading -= 360.0f;
+
+    while (heading < 0.0f)
+        heading += 360.0f;
+
+    // Vertical speed responds to pitch.
+    float targetVS =
+        pitchDeg * 65.0f;
+
+    verticalSpeed =
+        smoothToward(
+            verticalSpeed,
+            targetVS,
+            0.035f
+        );
+
+    altitude +=
+        verticalSpeed / 1800.0f;
+
+    if (altitude < 0)
+        altitude = 0;
+
+    // Airspeed changes gently with pitch.
+    float targetSpeed =
+        110.0f -
+        pitchDeg * 0.45f;
+
+    targetSpeed =
+        clampFloat(
+            targetSpeed,
+            65.0f,
+            165.0f
+        );
+
+    airspeed =
+        smoothToward(
+            airspeed,
+            targetSpeed,
+            0.025f
         );
 }
 
 // ============================================================
-// Bullets
+// Horizon background
 // ============================================================
 
-void fireBullet()
+void drawHorizonBackground()
 {
-    if (millis() - lastShot < 180)
-        return;
+    // First draw full sky.
+    canvas->fillScreen(SKY_BLUE);
 
-    for (int i = 0; i < MAX_BULLETS; i++)
+    float bank =
+        degToRad(bankDeg);
+
+    // Pitch scale:
+    // 3 pixels per degree gives ±25 degrees plenty of movement.
+    float pitchPixels =
+        pitchDeg * 3.0f;
+
+    // Horizon line equation in screen space.
+    //
+    // Instead of rotating an enormous bitmap, calculate the horizon
+    // Y position for each screen column and fill ground below it.
+    float slope =
+        tanf(bank);
+
+    for (int x = 0; x < SCREEN_W; x++)
     {
-        if (bullets[i].active)
+        float relativeX =
+            x - SCREEN_W / 2.0f;
+
+        float horizonY =
+            SCREEN_H / 2.0f +
+            pitchPixels +
+            relativeX * slope;
+
+        int y =
+            (int)horizonY;
+
+        if (y < 0)
+        {
+            canvas->drawFastVLine(
+                x,
+                0,
+                SCREEN_H,
+                GROUND_BROWN
+            );
+        }
+        else if (y < SCREEN_H)
+        {
+            canvas->drawFastVLine(
+                x,
+                y,
+                SCREEN_H - y,
+                GROUND_BROWN
+            );
+        }
+    }
+
+    // Horizon itself.
+    int hx1;
+    int hy1;
+    int hx2;
+    int hy2;
+
+    rotatePoint(
+        -170,
+        pitchPixels,
+        bank,
+        hx1,
+        hy1
+    );
+
+    rotatePoint(
+        170,
+        pitchPixels,
+        bank,
+        hx2,
+        hy2
+    );
+
+    canvas->drawLine(
+        hx1,
+        hy1,
+        hx2,
+        hy2,
+        C_WHITE
+    );
+}
+
+// ============================================================
+// Pitch ladder
+// ============================================================
+
+void drawPitchLadder()
+{
+    float bank =
+        degToRad(bankDeg);
+
+    constexpr float pixelsPerDegree = 3.0f;
+
+    // Draw -30 to +30 degree ladder.
+    for (int mark = -30; mark <= 30; mark += 5)
+    {
+        if (mark == 0)
             continue;
 
-        float a =
-            degToRad(ship.angle);
+        float localY =
+            (pitchDeg - mark) *
+            pixelsPerDegree;
 
-        bullets[i].x =
-            ship.x +
-            cosf(a) * 12.0f;
+        int halfWidth =
+            (mark % 10 == 0)
+                ? 25
+                : 14;
 
-        bullets[i].y =
-            ship.y +
-            sinf(a) * 12.0f;
+        int x1;
+        int y1;
+        int x2;
+        int y2;
 
-        bullets[i].vx =
-            ship.vx +
-            cosf(a) * 5.0f;
+        rotatePoint(
+            -halfWidth,
+            localY,
+            bank,
+            x1,
+            y1
+        );
 
-        bullets[i].vy =
-            ship.vy +
-            sinf(a) * 5.0f;
+        rotatePoint(
+            halfWidth,
+            localY,
+            bank,
+            x2,
+            y2
+        );
 
-        bullets[i].life = 42;
-        bullets[i].active = true;
-
-        lastShot = millis();
-
-        return;
-    }
-}
-
-void updateBullets()
-{
-    for (int i = 0; i < MAX_BULLETS; i++)
-    {
-        Bullet &b = bullets[i];
-
-        if (!b.active)
-            continue;
-
-        b.x += b.vx;
-        b.y += b.vy;
-
-        b.x =
-            wrapFloat(
-                b.x,
-                SCREEN_W
-            );
-
-        b.y =
-            wrapFloat(
-                b.y,
-                SCREEN_H
-            );
-
-        b.life--;
-
-        if (b.life <= 0)
+        // Skip lines that are completely well outside display.
+        if ((y1 < -20 && y2 < -20) ||
+            (y1 > SCREEN_H + 20 &&
+             y2 > SCREEN_H + 20))
         {
-            b.active = false;
             continue;
         }
 
-        canvas->fillCircle(
-            (int)b.x,
-            (int)b.y,
-            2,
-            C_YELLOW
+        canvas->drawLine(
+            x1,
+            y1,
+            x2,
+            y2,
+            C_WHITE
+        );
+
+        // Small end ticks.
+        float tickDirection =
+            mark > 0
+                ? 4.0f
+                : -4.0f;
+
+        int tx1;
+        int ty1;
+        int tx2;
+        int ty2;
+
+        rotatePoint(
+            -halfWidth,
+            localY + tickDirection,
+            bank,
+            tx1,
+            ty1
+        );
+
+        rotatePoint(
+            halfWidth,
+            localY + tickDirection,
+            bank,
+            tx2,
+            ty2
+        );
+
+        canvas->drawLine(
+            x1,
+            y1,
+            tx1,
+            ty1,
+            C_WHITE
+        );
+
+        canvas->drawLine(
+            x2,
+            y2,
+            tx2,
+            ty2,
+            C_WHITE
         );
     }
 }
 
 // ============================================================
-// Asteroids
+// Fixed aircraft symbol
 // ============================================================
 
-void clearAsteroids()
+void drawAircraftSymbol()
 {
-    for (int i = 0; i < MAX_ASTEROIDS; i++)
-        asteroids[i].active = false;
-}
+    constexpr int cx = SCREEN_W / 2;
+    constexpr int cy = SCREEN_H / 2;
 
-int findFreeAsteroid()
+    // Black outline for readability.
+    canvas->drawFastHLine(
+        cx - 42,
+        cy,
+        28,
+        C_BLACK
+    );
+
+    canvas->drawFastHLine(
+        cx + 14,
+        cy,
+        28,
+        C_BLACK
+    );
+
+    // Yellow wings.
+    canvas->drawFastHLine(
+        cx - 40,
+        cy,
+        26,
+        C_YELLOW
+    );
+
+    canvas->drawFastHLine(
+        cx + 14,
+        cy,
+        26,
+        C_YELLOW
+    );
+
+    canvas->drawFastVLine(
+        cx - 14,
+        cy,
+        7,
+        C_YELLOW
+    );
+
+    canvas->drawFastVLine(
+        cx + 14,
+        cy,
+        7,
+        C_YELLOW
+    );
+
+    // Centre reference.
+    canvas->drawCircle(
+        cx,
+        cy,
+        4,
+        C_YELLOW
+    );
+
+    canvas->fillCircle(
+        cx,
+        cy,
+        1,
+        C_WHITE
+    );
+}
+// ============================================================
+// Roll scale
+// ============================================================
+
+void drawRollScale()
 {
-    for (int i = 0; i < MAX_ASTEROIDS; i++)
+    constexpr int cx = SCREEN_W / 2;
+    constexpr int cy = 92;
+    constexpr int radius = 74;
+
+    // Fixed roll marks across the top.
+    const int marks[] =
     {
-        if (!asteroids[i].active)
-            return i;
-    }
+        -60, -45, -30, -20, -10,
+         0,
+         10, 20, 30, 45, 60
+    };
 
-    return -1;
-}
+    constexpr int markCount =
+        sizeof(marks) / sizeof(marks[0]);
 
-void spawnAsteroid(
-    float x,
-    float y,
-    int size,
-    float baseSpeed = 1.0f)
-{
-    int index = findFreeAsteroid();
-
-    if (index < 0)
-        return;
-
-    Asteroid &a =
-        asteroids[index];
-
-    a.x = x;
-    a.y = y;
-
-    float direction =
-        random(0, 628) / 100.0f;
-
-    float velocity =
-        baseSpeed *
-        random(70, 130) /
-        100.0f;
-
-    a.vx =
-        cosf(direction) *
-        velocity;
-
-    a.vy =
-        sinf(direction) *
-        velocity;
-
-    a.rotation =
-        random(0, 360);
-
-    a.rotationSpeed =
-        random(-20, 21) /
-        10.0f;
-
-    a.size = size;
-    a.active = true;
-    a.shape = random(0, 4
-
-            );
-}
-
-void spawnWave()
-{
-    clearAsteroids();
-
-    int count =
-        constrain(
-            3 + wave,
-            4,
-            8
-        );
-
-    for (int i = 0; i < count; i++)
-    {
-        float x;
-        float y;
-
-        // Spawn around screen edges and away from player.
-        int edge = random(0, 4);
-
-        if (edge == 0)
-        {
-            x = random(0, SCREEN_W);
-            y = 4;
-        }
-        else if (edge == 1)
-        {
-            x = SCREEN_W - 4;
-            y = random(24, SCREEN_H);
-        }
-        else if (edge == 2)
-        {
-            x = random(0, SCREEN_W);
-            y = SCREEN_H - 4;
-        }
-        else
-        {
-            x = 4;
-            y = random(24, SCREEN_H);
-        }
-
-        spawnAsteroid(
-            x,
-            y,
-            AST_LARGE,
-            0.65f + wave * 0.07f
-        );
-    }
-}
-
-void drawAsteroid(
-    const Asteroid &a)
-{
-    int radius =
-        asteroidRadius(a.size);
-
-    constexpr int POINTS = 8;
-
-    int px[POINTS];
-    int py[POINTS];
-
-    for (int i = 0; i < POINTS; i++)
+    for (int i = 0; i < markCount; i++)
     {
         float angle =
             degToRad(
-                a.rotation +
-                i * (360.0f / POINTS)
+                marks[i] - 90.0f
             );
 
-        // Deterministic rough outline.
-        float roughness =
-            0.78f +
-            (((i + a.shape * 3) % 4) * 0.09f);
+        int innerRadius =
+            (marks[i] % 30 == 0)
+                ? radius - 9
+                : radius - 5;
 
-        float r =
-            radius * roughness;
+        int x1 =
+            cx +
+            cosf(angle) *
+            innerRadius;
 
-        px[i] =
-            (int)(
-                a.x +
-                cosf(angle) * r
-            );
+        int y1 =
+            cy +
+            sinf(angle) *
+            innerRadius;
 
-        py[i] =
-            (int)(
-                a.y +
-                sinf(angle) * r
-            );
-    }
+        int x2 =
+            cx +
+            cosf(angle) *
+            radius;
 
-    uint16_t colour;
-
-    if (a.size == AST_LARGE)
-        colour = C_WHITE;
-    else if (a.size == AST_MEDIUM)
-        colour = C_CYAN;
-    else
-        colour = C_GREY;
-
-    for (int i = 0; i < POINTS; i++)
-    {
-        int next =
-            (i + 1) % POINTS;
+        int y2 =
+            cy +
+            sinf(angle) *
+            radius;
 
         canvas->drawLine(
-            px[i],
-            py[i],
-            px[next],
-            py[next],
-            colour
+            x1,
+            y1,
+            x2,
+            y2,
+            C_WHITE
         );
     }
 
-    // A few internal rock details.
-    canvas->drawLine(
-        (int)a.x - radius / 3,
-        (int)a.y - radius / 4,
-        (int)a.x + radius / 4,
-        (int)a.y + radius / 5,
-        C_DKGREY
+    // Fixed centre triangle.
+    canvas->fillTriangle(
+        cx,
+        cy - radius + 1,
+        cx - 5,
+        cy - radius + 9,
+        cx + 5,
+        cy - radius + 9,
+        C_WHITE
+    );
+
+    // Moving bank pointer.
+    float pointerAngle =
+        degToRad(
+            bankDeg - 90.0f
+        );
+
+    int px =
+        cx +
+        cosf(pointerAngle) *
+        (radius - 14);
+
+    int py =
+        cy +
+        sinf(pointerAngle) *
+        (radius - 14);
+
+    int lx =
+        cx +
+        cosf(pointerAngle - 0.07f) *
+        (radius - 22);
+
+    int ly =
+        cy +
+        sinf(pointerAngle - 0.07f) *
+        (radius - 22);
+
+    int rx =
+        cx +
+        cosf(pointerAngle + 0.07f) *
+        (radius - 22);
+
+    int ry =
+        cy +
+        sinf(pointerAngle + 0.07f) *
+        (radius - 22);
+
+    canvas->fillTriangle(
+        px,
+        py,
+        lx,
+        ly,
+        rx,
+        ry,
+        C_YELLOW
     );
 }
 
-void updateAsteroids()
-{
-    for (int i = 0; i < MAX_ASTEROIDS; i++)
-    {
-        Asteroid &a =
-            asteroids[i];
-
-        if (!a.active)
-            continue;
-
-        a.x += a.vx;
-        a.y += a.vy;
-
-        a.x =
-            wrapFloat(
-                a.x,
-                SCREEN_W
-            );
-
-        a.y =
-            wrapFloat(
-                a.y,
-                SCREEN_H
-            );
-
-        a.rotation +=
-            a.rotationSpeed;
-
-        drawAsteroid(a);
-    }
-}
-
-int activeAsteroidCount()
-{
-    int count = 0;
-
-    for (int i = 0; i < MAX_ASTEROIDS; i++)
-    {
-        if (asteroids[i].active)
-            count++;
-    }
-
-    return count;
-}
-
 // ============================================================
-// Asteroid destruction / splitting
+// Airspeed tape
 // ============================================================
 
-void asteroidExplosion(
-    float x,
-    float y,
-    int size)
+void drawAirspeedTape()
 {
-    int particlesToCreate =
-        size == AST_LARGE
-            ? 14
-            : size == AST_MEDIUM
-                ? 10
-                : 7;
+    constexpr int x = 0;
+    constexpr int y = 34;
+    constexpr int w = 42;
+    constexpr int h = 164;
 
-    for (int i = 0; i < particlesToCreate; i++)
-    {
-        float angle =
-            random(0, 628) /
-            100.0f;
-
-        float speed =
-            random(5, 24) /
-            10.0f;
-
-        spawnParticle(
-            x,
-            y,
-            cosf(angle) * speed,
-            sinf(angle) * speed,
-            random(10, 26),
-            random(0, 3) == 0
-                ? C_YELLOW
-                : C_WHITE
-        );
-    }
-}
-
-void destroyAsteroid(
-    int asteroidIndex)
-{
-    Asteroid &a =
-        asteroids[asteroidIndex];
-
-    if (!a.active)
-        return;
-
-    float x = a.x;
-    float y = a.y;
-
-    float oldVx = a.vx;
-    float oldVy = a.vy;
-
-    int oldSize = a.size;
-
-    a.active = false;
-
-    asteroidExplosion(
+    canvas->fillRect(
         x,
         y,
-        oldSize
+        w,
+        h,
+        C_BLACK
     );
 
-    if (oldSize == AST_LARGE)
-    {
-        score += 20;
-
-        spawnAsteroid(
-            x,
-            y,
-            AST_MEDIUM,
-            1.25f
-        );
-
-        spawnAsteroid(
-            x + 2,
-            y + 2,
-            AST_MEDIUM,
-            1.25f
-        );
-    }
-    else if (oldSize == AST_MEDIUM)
-    {
-        score += 50;
-
-        spawnAsteroid(
-            x,
-            y,
-            AST_SMALL,
-            1.65f
-        );
-
-        spawnAsteroid(
-            x + 2,
-            y - 2,
-            AST_SMALL,
-            1.65f
-        );
-    }
-    else
-    {
-        score += 100;
-    }
-
-    // Add some inherited motion to newly spawned fragments.
-    for (int i = 0; i < MAX_ASTEROIDS; i++)
-    {
-        Asteroid &fragment =
-            asteroids[i];
-
-        if (!fragment.active)
-            continue;
-
-        if (distanceSquared(
-                fragment.x,
-                fragment.y,
-                x,
-                y) < 30.0f)
-        {
-            fragment.vx +=
-                oldVx * 0.25f;
-
-            fragment.vy +=
-                oldVy * 0.25f;
-        }
-    }
-}
-
-// ============================================================
-// Bullet collisions
-// ============================================================
-
-void checkBulletCollisions()
-{
-    for (int b = 0; b < MAX_BULLETS; b++)
-    {
-        if (!bullets[b].active)
-            continue;
-
-        for (int a = 0; a < MAX_ASTEROIDS; a++)
-        {
-            if (!asteroids[a].active)
-                continue;
-
-            float radius =
-                asteroidRadius(
-                    asteroids[a].size
-                );
-
-            float d2 =
-                distanceSquared(
-                    bullets[b].x,
-                    bullets[b].y,
-                    asteroids[a].x,
-                    asteroids[a].y
-                );
-
-            if (d2 <= radius * radius)
-            {
-                bullets[b].active = false;
-
-                destroyAsteroid(a);
-
-                break;
-            }
-        }
-    }
-}
-
-// ============================================================
-// Player collision
-// ============================================================
-
-void explodePlayer()
-{
-    gameState = PLAYER_EXPLODING;
-    stateStart = millis();
-
-    if (score > highScore)
-        highScore = score;
-
-    for (int i = 0; i < 30; i++)
-    {
-        float angle =
-            random(0, 628) /
-            100.0f;
-
-        float speed =
-            random(8, 32) /
-            10.0f;
-
-        uint16_t colour;
-
-        int c = random(0, 4);
-
-        if (c == 0)
-            colour = C_RED;
-        else if (c == 1)
-            colour = C_YELLOW;
-        else if (c == 2)
-            colour = C_CYAN;
-        else
-            colour = C_WHITE;
-
-        spawnParticle(
-            ship.x,
-            ship.y,
-            cosf(angle) * speed,
-            sinf(angle) * speed,
-            random(15, 35),
-            colour
-        );
-    }
-}
-
-void checkPlayerCollision()
-{
-    constexpr float shipRadius = 7.0f;
-
-    for (int i = 0; i < MAX_ASTEROIDS; i++)
-    {
-        if (!asteroids[i].active)
-            continue;
-
-        float radius =
-            asteroidRadius(
-                asteroids[i].size
-            );
-
-        float totalRadius =
-            radius +
-            shipRadius;
-
-        if (distanceSquared(
-                ship.x,
-                ship.y,
-                asteroids[i].x,
-                asteroids[i].y)
-            <= totalRadius * totalRadius)
-        {
-            explodePlayer();
-            return;
-        }
-    }
-}
-
-// ============================================================
-// Radar / threat ring
-// ============================================================
-
-void drawRadar()
-{
-    // Subtle ring around player.
-    canvas->drawCircle(
-        (int)ship.x,
-        (int)ship.y,
-        24,
-        C_DKGREY
+    canvas->drawRect(
+        x,
+        y,
+        w,
+        h,
+        C_GREY
     );
 
-    // Highlight nearby threats.
-    for (int i = 0; i < MAX_ASTEROIDS; i++)
+    // Moving scale.
+    int centreSpeed =
+        (int)airspeed;
+
+    for (int value =
+             centreSpeed - 50;
+         value <=
+             centreSpeed + 50;
+         value += 10)
     {
-        if (!asteroids[i].active)
+        float delta =
+            value - airspeed;
+
+        int py =
+            116 -
+            (int)(delta * 2.0f);
+
+        if (py < y + 5 ||
+            py > y + h - 5)
+        {
             continue;
+        }
 
-        float d2 =
-            distanceSquared(
-                ship.x,
-                ship.y,
-                asteroids[i].x,
-                asteroids[i].y
-            );
+        int tick =
+            (value % 20 == 0)
+                ? 10
+                : 6;
 
-        if (d2 > 55.0f * 55.0f)
-            continue;
-
-        float dx =
-            asteroids[i].x -
-            ship.x;
-
-        float dy =
-            asteroids[i].y -
-            ship.y;
-
-        if (fabsf(dx) > SCREEN_W / 2)
-            dx =
-                dx > 0
-                    ? dx - SCREEN_W
-                    : dx + SCREEN_W;
-
-        if (fabsf(dy) > SCREEN_H / 2)
-            dy =
-                dy > 0
-                    ? dy - SCREEN_H
-                    : dy + SCREEN_H;
-
-        float angle =
-            atan2f(dy, dx);
-
-        int rx =
-            (int)(
-                ship.x +
-                cosf(angle) * 24.0f
-            );
-
-        int ry =
-            (int)(
-                ship.y +
-                sinf(angle) * 24.0f
-            );
-
-        canvas->fillCircle(
-            rx,
-            ry,
-            2,
-            C_RED
+        canvas->drawFastHLine(
+            w - tick,
+            py,
+            tick,
+            C_WHITE
         );
+
+        if (value % 20 == 0 &&
+            value >= 0)
+        {
+            char text[8];
+
+            snprintf(
+                text,
+                sizeof(text),
+                "%d",
+                value
+            );
+
+            canvas->setTextSize(1);
+            canvas->setTextColor(C_WHITE);
+            canvas->setCursor(
+                3,
+                py - 3
+            );
+            canvas->print(text);
+        }
     }
-}
 
-// ============================================================
-// HUD
-// ============================================================
-
-void drawHUD()
-{
+    // Current airspeed box.
     canvas->fillRect(
         0,
+        105,
+        42,
+        23,
+        C_BLACK
+    );
+
+    canvas->drawRect(
         0,
+        105,
+        42,
+        23,
+        C_CYAN
+    );
+
+    char current[8];
+
+    snprintf(
+        current,
+        sizeof(current),
+        "%03d",
+        (int)airspeed
+    );
+
+    canvas->setTextSize(2);
+    canvas->setTextColor(C_WHITE);
+    canvas->setCursor(
+        3,
+        109
+    );
+    canvas->print(current);
+
+    canvas->setTextSize(1);
+    canvas->setTextColor(C_CYAN);
+    canvas->setCursor(
+        4,
+        23
+    );
+    canvas->print("IAS");
+}
+
+// ============================================================
+// Altitude tape
+// ============================================================
+
+void drawAltitudeTape()
+{
+    constexpr int x = 198;
+    constexpr int y = 34;
+    constexpr int w = 42;
+    constexpr int h = 164;
+
+    canvas->fillRect(
+        x,
+        y,
+        w,
+        h,
+        C_BLACK
+    );
+
+    canvas->drawRect(
+        x,
+        y,
+        w,
+        h,
+        C_GREY
+    );
+
+    int centreAltitude =
+        ((int)altitude / 100) * 100;
+
+    for (int value =
+             centreAltitude - 500;
+         value <=
+             centreAltitude + 500;
+         value += 100)
+    {
+        float delta =
+            value - altitude;
+
+        int py =
+            116 -
+            (int)(delta * 0.20f);
+
+        if (py < y + 5 ||
+            py > y + h - 5)
+        {
+            continue;
+        }
+
+        int tick =
+            (value % 200 == 0)
+                ? 10
+                : 6;
+
+        canvas->drawFastHLine(
+            x,
+            py,
+            tick,
+            C_WHITE
+        );
+
+        if (value % 200 == 0 &&
+            value >= 0)
+        {
+            char text[8];
+
+            snprintf(
+                text,
+                sizeof(text),
+                "%d",
+                value
+            );
+
+            canvas->setTextSize(1);
+            canvas->setTextColor(C_WHITE);
+
+            canvas->setCursor(
+                x + 12,
+                py - 3
+            );
+
+            canvas->print(text);
+        }
+    }
+
+    // Current altitude box.
+    canvas->fillRect(
+        x,
+        105,
+        w,
+        23,
+        C_BLACK
+    );
+
+    canvas->drawRect(
+        x,
+        105,
+        w,
+        23,
+        C_GREEN
+    );
+
+    char current[10];
+
+    snprintf(
+        current,
+        sizeof(current),
+        "%04d",
+        (int)altitude
+    );
+
+    canvas->setTextSize(1);
+    canvas->setTextColor(C_WHITE);
+
+    canvas->setCursor(
+        x + 6,
+        113
+    );
+
+    canvas->print(current);
+
+    canvas->setTextColor(C_GREEN);
+    canvas->setCursor(
+        213,
+        23
+    );
+    canvas->print("ALT");
+}
+
+// ============================================================
+// Vertical speed indicator
+// ============================================================
+
+void drawVerticalSpeed()
+{
+    constexpr int x = 190;
+    constexpr int centreY = 116;
+
+    canvas->drawFastVLine(
+        x,
+        62,
+        108,
+        C_GREY
+    );
+
+    canvas->drawFastHLine(
+        x - 4,
+        centreY,
+        8,
+        C_WHITE
+    );
+
+    float normalized =
+        clampFloat(
+            verticalSpeed / 1800.0f,
+            -1.0f,
+            1.0f
+        );
+
+    int pointerY =
+        centreY -
+        (int)(normalized * 48.0f);
+
+    canvas->fillTriangle(
+        x,
+        pointerY,
+        x - 7,
+        pointerY - 4,
+        x - 7,
+        pointerY + 4,
+        C_GREEN
+    );
+
+    canvas->setTextSize(1);
+    canvas->setTextColor(C_GREY);
+
+    canvas->setCursor(
+        181,
+        51
+    );
+    canvas->print("+");
+
+    canvas->setCursor(
+        181,
+        172
+    );
+    canvas->print("-");
+}
+
+// ============================================================
+// Heading strip
+// ============================================================
+
+void drawHeadingStrip()
+{
+    constexpr int y = 202;
+    constexpr int h = 38;
+
+    canvas->fillRect(
+        0,
+        y,
         SCREEN_W,
-        22,
+        h,
         C_BLACK
     );
 
     canvas->drawFastHLine(
         0,
-        21,
+        y,
         SCREEN_W,
-        C_DKGREY
+        C_GREY
+    );
+
+    // Heading marks every 10 degrees.
+    int base =
+        ((int)heading / 10) * 10;
+
+    for (int offset = -60;
+         offset <= 60;
+         offset += 10)
+    {
+        int hdg =
+            base + offset;
+
+        while (hdg < 0)
+            hdg += 360;
+
+        while (hdg >= 360)
+            hdg -= 360;
+
+        float difference =
+            (base + offset) -
+            heading;
+
+        int px =
+            SCREEN_W / 2 +
+            (int)(difference * 2.0f);
+
+        if (px < 4 ||
+            px > SCREEN_W - 4)
+        {
+            continue;
+        }
+
+        int tickHeight =
+            (hdg % 30 == 0)
+                ? 8
+                : 4;
+
+        canvas->drawFastVLine(
+            px,
+            y,
+            tickHeight,
+            C_WHITE
+        );
+
+        if (hdg % 30 == 0)
+        {
+            char label[8];
+
+            if (hdg == 0)
+                strcpy(label, "N");
+            else if (hdg == 90)
+                strcpy(label, "E");
+            else if (hdg == 180)
+                strcpy(label, "S");
+            else if (hdg == 270)
+                strcpy(label, "W");
+            else
+                snprintf(
+                    label,
+                    sizeof(label),
+                    "%02d",
+                    hdg / 10
+                );
+
+            canvas->setTextSize(1);
+            canvas->setTextColor(C_WHITE);
+
+            canvas->setCursor(
+                px - 3,
+                y + 10
+            );
+
+            canvas->print(label);
+        }
+    }
+
+    // Heading selection box.
+    canvas->fillTriangle(
+        SCREEN_W / 2,
+        y,
+        SCREEN_W / 2 - 5,
+        y + 6,
+        SCREEN_W / 2 + 5,
+        y + 6,
+        PFD_MAGENTA
+    );
+
+    char current[8];
+
+    snprintf(
+        current,
+        sizeof(current),
+        "%03d",
+        (int)heading
+    );
+
+    canvas->fillRect(
+        101,
+        220,
+        38,
+        18,
+        C_BLACK
+    );
+
+    canvas->drawRect(
+        101,
+        220,
+        38,
+        18,
+        PFD_MAGENTA
+    );
+
+    canvas->setTextSize(1);
+    canvas->setTextColor(C_WHITE);
+    canvas->setCursor(
+        111,
+        226
+    );
+    canvas->print(current);
+}
+
+// ============================================================
+// Flight mode annunciator
+// ============================================================
+
+void drawModeAnnunciator()
+{
+    canvas->fillRect(
+        70,
+        2,
+        100,
+        18,
+        C_BLACK
+    );
+
+    canvas->drawRect(
+        70,
+        2,
+        100,
+        18,
+        autopilot
+            ? C_GREEN
+            : C_GREY
     );
 
     canvas->setTextSize(1);
 
-    canvas->setTextColor(C_CYAN);
-    canvas->setCursor(4, 4);
-    canvas->print("FORGEUI");
-
-    canvas->setTextColor(C_WHITE);
-    canvas->setCursor(58, 4);
-    canvas->printf(
-        "SCORE %05lu",
-        (unsigned long)score
-    );
-
-    canvas->setTextColor(C_YELLOW);
-    canvas->setCursor(146, 4);
-    canvas->printf(
-        "W%d",
-        wave
-    );
-
-    canvas->setTextColor(C_GREEN);
-    canvas->setCursor(178, 4);
-    canvas->print("L");
-
-    for (int i = 0; i < lives; i++)
+    if (autopilot)
     {
-        int x =
-            190 + i * 13;
-
-        canvas->drawTriangle(
-            x + 5, 3,
-            x, 12,
-            x + 10, 12,
-            C_GREEN
-        );
+        canvas->setTextColor(C_GREEN);
+        canvas->setCursor(82, 7);
+        canvas->print("AP  LEVEL");
+    }
+    else
+    {
+        canvas->setTextColor(C_CYAN);
+        canvas->setCursor(82, 7);
+        canvas->print("MANUAL FLT");
     }
 }
 
 // ============================================================
-// Title screen
+// Warning annunciations
 // ============================================================
 
-void drawTitle()
+void drawWarnings()
 {
-    clearFrame();
-    drawStars();
+    bool excessiveBank =
+        fabsf(bankDeg) > 45.0f;
 
-    canvas->drawCircle(
-        SCREEN_W / 2,
+    bool excessivePitch =
+        fabsf(pitchDeg) > 20.0f;
+
+    if (!excessiveBank &&
+        !excessivePitch)
+    {
+        return;
+    }
+
+    canvas->fillRect(
+        64,
+        177,
         112,
-        62,
-        C_DKGREY
+        18,
+        C_RED
     );
 
-    canvas->drawCircle(
-        SCREEN_W / 2,
-        112,
-        64,
+    canvas->setTextSize(1);
+    canvas->setTextColor(C_WHITE);
+
+    if (excessiveBank)
+    {
+        canvas->setCursor(
+            82,
+            183
+        );
+        canvas->print("BANK ANGLE");
+    }
+    else
+    {
+        canvas->setCursor(
+            88,
+            183
+        );
+        canvas->print("PITCH");
+    }
+}
+// ============================================================
+// Startup / self-test
+// ============================================================
+
+void drawStartupScreen()
+{
+    canvas->fillScreen(C_BLACK);
+
+    canvas->drawRect(
+        8,
+        8,
+        224,
+        224,
+        C_CYAN
+    );
+
+    canvas->drawRect(
+        12,
+        12,
+        216,
+        216,
         C_BLUE
     );
 
     centredText(
         "FORGEUI",
-        46,
+        52,
         3,
         C_CYAN
     );
 
     centredText(
-        "MICRO",
-        83,
+        "MICROPILOT",
+        88,
         2,
         C_WHITE
     );
 
     centredText(
-        "ASTEROIDS",
-        108,
-        3,
-        C_WHITE
-    );
-
-    // Decorative ship
-    canvas->drawTriangle(
-        120, 148,
-        110, 166,
-        130, 166,
-        C_CYAN
-    );
-
-    canvas->fillCircle(
+        "PRIMARY FLIGHT DISPLAY",
         120,
-        158,
-        2,
-        C_WHITE
-    );
-
-    centredText(
-        "ROTATE  THRUST  FIRE",
-        188,
         1,
         C_GREY
     );
 
-    if (((millis() / 450) % 2) == 0)
-    {
-        centredText(
-            "PRESS STICK TO LAUNCH",
-            211,
-            1,
-            C_GREEN
-        );
-    }
-
-    presentFrame();
-}
-
-// ============================================================
-// Game over
-// ============================================================
-
-void drawGameOver()
-{
-    clearFrame();
-    drawStars();
-
     centredText(
-        "MISSION LOST",
-        62,
-        3,
-        C_RED
-    );
-
-    char scoreText[40];
-
-    snprintf(
-        scoreText,
-        sizeof(scoreText),
-        "SCORE %lu",
-        (unsigned long)score
-    );
-
-    centredText(
-        scoreText,
-        112,
-        2,
+        "ESP32-S3 // ST7789",
+        143,
+        1,
         C_WHITE
     );
 
-    char bestText[40];
-
-    snprintf(
-        bestText,
-        sizeof(bestText),
-        "BEST %lu",
-        (unsigned long)highScore
-    );
-
     centredText(
-        bestText,
-        140,
-        2,
-        C_CYAN
-    );
-
-    char waveText[24];
-
-    snprintf(
-        waveText,
-        sizeof(waveText),
-        "WAVE %d",
-        wave
-    );
-
-    centredText(
-        waveText,
-        168,
+        "SYSTEM SELF TEST",
+        174,
         1,
         C_YELLOW
     );
 
-    if (((millis() / 450) % 2) == 0)
-    {
-        centredText(
-            "PRESS TO RELAUNCH",
-            205,
-            1,
-            C_GREEN
-        );
-    }
-
-    presentFrame();
-}
-
-// ============================================================
-// Player explosion screen
-// ============================================================
-
-void updatePlayerExplosion()
-{
-    clearFrame();
-
-    drawStars();
-
-    updateAsteroids();
-    updateParticles();
-
-    drawHUD();
-
     centredText(
-        "SHIP LOST",
-        106,
-        2,
-        C_RED
+        "PFD READY",
+        198,
+        1,
+        C_GREEN
     );
 
-    presentFrame();
-
-    if (millis() - stateStart > 1200)
-    {
-        lives--;
-
-        if (lives <= 0)
-        {
-            gameState =
-                GAME_OVER;
-
-            stateStart =
-                millis();
-
-            return;
-        }
-
-        resetShip();
-
-        // Give the player a little breathing room.
-        for (int i = 0; i < MAX_ASTEROIDS; i++)
-        {
-            if (!asteroids[i].active)
-                continue;
-
-            if (distanceSquared(
-                    asteroids[i].x,
-                    asteroids[i].y,
-                    ship.x,
-                    ship.y)
-                < 50.0f * 50.0f)
-            {
-                asteroids[i].x =
-                    random(0, 2)
-                        ? 10
-                        : SCREEN_W - 10;
-
-                asteroids[i].y =
-                    random(
-                        30,
-                        SCREEN_H - 10
-                    );
-            }
-        }
-
-        gameState = PLAYING;
-    }
+    canvas->flush();
 }
 
 // ============================================================
-// Start game
+// PFD renderer
 // ============================================================
 
-void startGame()
+void drawPFD()
 {
-    score = 0;
-    lives = 3;
-    wave = 1;
+    // Moving attitude layer.
+    drawHorizonBackground();
+    drawPitchLadder();
 
-    resetShip();
+    // Fixed flight instrumentation.
+    drawRollScale();
+    drawAircraftSymbol();
 
-    for (int i = 0; i < MAX_BULLETS; i++)
-        bullets[i].active = false;
+    drawAirspeedTape();
+    drawAltitudeTape();
+    drawVerticalSpeed();
+    drawHeadingStrip();
 
-    for (int i = 0; i < MAX_PARTICLES; i++)
-        particles[i].active = false;
+    drawModeAnnunciator();
+    drawWarnings();
 
-    clearAsteroids();
+    // Small ForgeUI identity.
+    canvas->fillRect(
+        2,
+        2,
+        61,
+        17,
+        C_BLACK
+    );
 
-    spawnWave();
+    canvas->drawRect(
+        2,
+        2,
+        61,
+        17,
+        C_CYAN
+    );
 
-    gameState = PLAYING;
-    stateStart = millis();
+    canvas->setTextSize(1);
+    canvas->setTextColor(C_CYAN);
+
+    canvas->setCursor(
+        8,
+        7
+    );
+
+    canvas->print("FORGEUI");
+
+    canvas->flush();
 }
 
 // ============================================================
-// Main gameplay
+// Autopilot button
 // ============================================================
 
-void updateGame()
+void updateAutopilotButton()
 {
-    clearFrame();
+    static bool previousButton = false;
 
-    drawStars();
+    bool currentButton =
+        buttonPressed();
 
-    updateShip();
+    bool pressedEdge =
+        currentButton &&
+        !previousButton;
 
-    // Fire while button is held.
-    if (buttonPressed())
-        fireBullet();
+    previousButton =
+        currentButton;
 
-    updateBullets();
-    updateAsteroids();
-
-    checkBulletCollisions();
-
-    updateParticles();
-
-    drawRadar();
-    drawShip();
-    drawHUD();
-
-    checkPlayerCollision();
-
-    if (gameState != PLAYING)
+    if (!pressedEdge)
         return;
 
-    // New wave after all fragments are destroyed.
-    if (activeAsteroidCount() == 0)
-    {
-        wave++;
+    // Debounce.
+    if (millis() - lastButtonTime < 250)
+        return;
 
-        if (wave > 99)
-            wave = 99;
+    lastButtonTime = millis();
 
-        spawnWave();
-    }
+    autopilot = !autopilot;
 
-    presentFrame();
+    Serial.printf(
+        "Autopilot: %s\n",
+        autopilot
+            ? "ON"
+            : "OFF"
+    );
 }
 
 // ============================================================
@@ -1722,7 +1471,8 @@ void setup()
 
     Serial.println();
     Serial.println("==============================");
-    Serial.println("FORGEUI MICRO ASTEROIDS");
+    Serial.println("FORGEUI MICROPILOT");
+    Serial.println("PRIMARY FLIGHT DISPLAY");
     Serial.println("ESP32-S3 + ST7789 240x240");
     Serial.println("JOY X=6 Y=5 SW=4");
     Serial.println("==============================");
@@ -1734,7 +1484,7 @@ void setup()
 
     analogReadResolution(12);
 
-    // Physically proven square-display configuration.
+    // Physically proven ST7789 square-display baseline.
     if (!gfx->begin())
     {
         Serial.println(
@@ -1745,7 +1495,7 @@ void setup()
             delay(1000);
     }
 
-    // Allocate a full 240x240 RGB565 off-screen canvas.
+    // Full-resolution off-screen canvas.
     canvas =
         new Arduino_Canvas(
             SCREEN_W,
@@ -1764,20 +1514,33 @@ void setup()
             delay(1000);
     }
 
-    randomSeed(
-        analogRead(JOY_X) ^
-        analogRead(JOY_Y) ^
-        micros()
-    );
+    drawStartupScreen();
 
-    initStars();
+    delay(1600);
 
     calibrateJoystick();
 
-    gameState = TITLE;
-    stateStart = millis();
+    delay(500);
 
-    // Don't treat a held calibration button as start.
+    // Initial simulated flight condition.
+    bankDeg = 0.0f;
+    pitchDeg = 0.0f;
+
+    commandedBank = 0.0f;
+    commandedPitch = 0.0f;
+
+    airspeed = 105.0f;
+    altitude = 2450.0f;
+    verticalSpeed = 0.0f;
+    heading = 270.0f;
+
+    autopilot = false;
+
+    Serial.println(
+        "MICROPILOT PFD READY"
+    );
+
+    // Prevent held switch during calibration from toggling AP.
     while (buttonPressed())
         delay(10);
 }
@@ -1788,58 +1551,15 @@ void setup()
 
 void loop()
 {
-    // ~30 FPS
+    // Approximately 30 FPS.
     if (millis() - lastFrame < 33)
         return;
 
     lastFrame = millis();
 
-    static bool previousButton = false;
+    updateAutopilotButton();
 
-    bool currentButton =
-        buttonPressed();
+    updateFlightModel();
 
-    bool buttonEdge =
-        currentButton &&
-       
-                !previousButton;
-
-    previousButton =
-        currentButton;
-
-    switch (gameState)
-    {
-        case TITLE:
-        {
-            drawTitle();
-
-            if (buttonEdge)
-                startGame();
-
-            break;
-        }
-
-        case PLAYING:
-        {
-            updateGame();
-            break;
-        }
-
-        case PLAYER_EXPLODING:
-        {
-            updatePlayerExplosion();
-            break;
-        }
-
-        case GAME_OVER:
-        {
-            drawGameOver();
-
-            if (buttonEdge)
-                startGame();
-
-            break;
-        }
-    
-    }
+    drawPFD();
 }
